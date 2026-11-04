@@ -155,7 +155,10 @@ class EnergyCommunityModel:
                 if self.mode == "I":
                     q_below = self.var["q_below"]
                     q_exc = self.var["q_exc"]
-                    kappa_i = self.data.contract.share[m_data.consumer_id]
+                    individual_cap = (
+                        self.data.contract.individual_capacity_limit_kW[m_data.consumer_id]
+                        * self.cap_factor
+                    )
                     
                     # Explicit non-negativity
                     self.con[f"q_below_min_{i}"] = self.m.addConstrs((q_below[i, t] >= 0 for t in self.T), name=f"q_below_min_{i}")
@@ -163,7 +166,7 @@ class EnergyCommunityModel:
                     
                     # Split import into below-cap and exceedance, constrained by individual cap
                     self.con[f"imp_split_{i}"] = self.m.addConstrs((q_imp[i, t] == q_below[i, t] + q_exc[i, t] for t in self.T), name=f"imp_split_{i}")
-                    self.con[f"cap_indiv_{i}"] = self.m.addConstrs((q_below[i, t] <= kappa_i * self.cap_limit[t] for t in self.T), name=f"cap_indiv_{i}")
+                    self.con[f"cap_indiv_{i}"] = self.m.addConstrs((q_below[i, t] <= individual_cap[t] for t in self.T), name=f"cap_indiv_{i}")
 
         elif self.mode == "C":
             P_imp = self.var["P_imp"]
