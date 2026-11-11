@@ -3,10 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.data_loader import load_community
 from src.model import EnergyCommunityModel
-
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 def run_discount_sensitivity(com_data, out_dir: Path):
     """Analyze how changing the tariff discount (beta) affects total costs."""
@@ -91,17 +88,3 @@ def run_cap_sensitivity(com_data, out_dir: Path):
     plt.legend()
     plt.savefig(out_dir / "Sensitivity_Cap.png", dpi=150)
     plt.close()
-
-
-if __name__ == "__main__":
-    # Setup data and output directory
-    com = load_community("base", day="d1")
-    out_dir = RESULTS_DIR / "base_sensitivity"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Run all three experiments
-    run_discount_sensitivity(com, out_dir)
-    run_penalty_sensitivity(com, out_dir)
-    run_cap_sensitivity(com, out_dir)
-    
-    print(f"Sensitivity analysis complete. Check the '{out_dir.relative_to(Path.cwd())}' folder for plots.")

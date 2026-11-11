@@ -182,8 +182,9 @@ class EnergyCommunityModel:
             
             # Community energy balance (Crucial for extracting internal prices / duals later)
             self.con["community_balance"] = self.m.addConstrs(
-                (gp.quicksum(l[i, t] + p_ch[i, t] - g[i, t] - p_dis[i, t] for i in range(len(self.members))) 
-                 + P_exp[t] == P_imp[t] for t in self.T),
+                (P_imp[t] - P_exp[t]
+                 - gp.quicksum(l[i, t] + p_ch[i, t] - g[i, t] - p_dis[i, t]
+                               for i in range(len(self.members))) == 0 for t in self.T),
                 name="community_balance"
             )
 
@@ -253,13 +254,86 @@ class EnergyCommunityModel:
             "status": "Optimal"
         }
         
-        # For Model C, extract the internal clearing prices (Shadow prices / Dual variables)
+        # Extract internal clearing prices for Model C before calculating settlements.
+        internal_prices = None
         if self.mode == "C":
             internal_prices = []
             for t in self.T:
-                # Retrieve the Pi attribute (shadow price) of the community balance constraint
-                pi = self.con["community_balance"][t].Pi
-                internal_prices.append(pi)
+                # The balance is written as import - export - net demand = 0,
+                # so the equality dual is the positive marginal price.
+                internal_prices.append(self.con["community_balance"][t].Pi)
             results["internal_prices"] = internal_prices
+
+        results.update(self._cost_breakdown(internal_prices))
             
         return results
+
+    def _cost_breakdown(self, internal_prices=None):
+        """Return per-consumer costs and the manager settlement balance."""
+        consumer_costs = {}
+        internal_cost_total = 0.0
+
+        for i, member in enumerate(self.members):
+            internal_cost = sum(
+                member.linear_disutility * self.var["dev"][i, t].X
+                + member.pv_marginal_cost * self.var["pv"][i, t].X
+                for t in self.T
+            )
+            internal_cost_total += internal_cost
+
+            if self.mode == "R":
+                grid_cost = sum(
+                    (member.energy_price[t] + member.import_tariff) * self.var["q_imp"][i, t].X
+                    - (member.energy_price[t] - member.export_tariff) * self.var["q_exp"][i, t].X
+                    for t in self.T
+                )
+                consumer_costs[member.consumer_id] = internal_cost + grid_cost
+            elif self.mode == "I":
+                grid_cost = sum(
+                    member.energy_price[t] * self.var["q_imp"][i, t].X
+                    - (member.energy_price[t] - (1 - self.discount) * member.export_tariff) * self.var["q_exp"][i, t].X
+                    + (1 - self.discount) * member.import_tariff * self.var["q_below"][i, t].X
+                    + self.penalty * self.var["q_exc"][i, t].X
+                    for t in self.T
+                )
+                consumer_costs[member.consumer_id] = internal_cost + grid_cost
+
+        if self.mode == "C":
+            external_grid_cost = sum(
+                self.data.energy_price[t] * self.var["P_imp"][t].X
+                - (self.data.energy_price[t] - (1 - self.discount) * self.data.export_tariff) * self.var["P_exp"][t].X
+                + (1 - self.discount) * self.data.import_tariff * self.var["P_below"][t].X
+                + self.penalty * self.var["P_exc"][t].X
+                for t in self.T
+            )
+            settlement = 0.0
+            for i, member in enumerate(self.members):
+                consumer_settlement = sum(
+                    internal_prices[t] * (
+                        self.var["load"][i, t].X
+                        + self.var["p_ch"][i, t].X
+                        - self.var["pv"][i, t].X
+                        - self.var["p_dis"][i, t].X
+                    )
+                    for t in self.T
+                )
+                consumer_costs[member.consumer_id] = (
+                    sum(
+                        member.linear_disutility * self.var["dev"][i, t].X
+                        + member.pv_marginal_cost * self.var["pv"][i, t].X
+                        for t in self.T
+                    )
+                    + consumer_settlement
+                )
+                settlement += consumer_settlement
+            manager_balance = settlement - external_grid_cost
+        else:
+            external_grid_cost = sum(consumer_costs.values()) - internal_cost_total
+            manager_balance = 0.0
+
+        return {
+            "consumer_costs": consumer_costs,
+            "external_grid_cost": external_grid_cost,
+            "manager_balance": manager_balance,
+            "system_cost_check": sum(consumer_costs.values()) - manager_balance,
+        }
