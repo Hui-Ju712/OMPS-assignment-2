@@ -73,7 +73,7 @@ def plot_community_schedule(
     
     # Internal clearing price (only applicable to Model C, dashed purple line)
     if model_obj.mode == "C" and "internal_prices" in results_dict:
-        ax2.step(T, results_dict["internal_prices"], where='mid', color='purple', linestyle='--', label='Internal Price ($\lambda$)')
+        ax2.step(T, results_dict["internal_prices"], where='mid', color='purple', linestyle='--', label=r'Internal Price ($\lambda$)')
         
     ax2.set_ylabel("Price (DKK/kWh)")
     
@@ -89,21 +89,32 @@ def plot_community_schedule(
 
 def plot_sensitivity(
     x_values: Sequence[float],
-    costs_by_model: dict[str, Sequence[float]],
+    value_by_model: dict[str, Sequence[float]],
+    exceedance_by_model: dict[str, Sequence[float]],
     xlabel: str,
     title: str,
     save_to: Path | str,
 ) -> plt.Figure:
-    """Plot optimized costs across sensitivity values for each model."""
-    fig, ax = plt.subplots(figsize=(8, 5))
+    """Plot community value against R and DSO import exceedance for each model."""
+    fig, (value_ax, excess_ax) = plt.subplots(1, 2, figsize=(12, 5))
     markers = {"Model R (Reference)": "^", "Model I (Individual)": "o", "Model C (Community)": "s"}
 
-    for label, costs in costs_by_model.items():
-        ax.plot(x_values, costs, marker=markers.get(label, "o"), label=label)
+    for label, values in value_by_model.items():
+        value_ax.plot(x_values, values, marker=markers.get(label, "o"), label=label)
+    value_ax.axhline(0, color="black", linewidth=1, linestyle="--")
+    value_ax.set_xlabel(xlabel)
+    value_ax.set_ylabel("Community value vs R (DKK)")
+    value_ax.set_title("Community")
+    value_ax.grid(alpha=0.3)
+    value_ax.legend()
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Total Daily Cost (DKK)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    ax.legend()
+    for label, exceedances in exceedance_by_model.items():
+        excess_ax.plot(x_values, exceedances, marker=markers.get(label, "o"), label=label)
+    excess_ax.set_xlabel(xlabel)
+    excess_ax.set_ylabel("Import above cap (kWh/day)")
+    excess_ax.set_title("DSO congestion")
+    excess_ax.grid(alpha=0.3)
+    excess_ax.legend()
+
+    fig.suptitle(title)
     return _finish(fig, save_to)

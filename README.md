@@ -53,7 +53,15 @@ conditions, big-M or SOS1 complementarity, strong-duality linearization of the p
 python main.py                  # loads the base case (16 members, day d1) and prints a summary
 python main.py --members        # ... plus the Assignment 1 summary of every member
 python main.py --demo           # ... plus the scenario-generation demonstration (Question 3)
+python main.py --sensitivity    # ... plus contract value and DSO congestion sensitivities
 ```
+
+The sensitivity study uses Model R as the no-contract reference, reusing its base-case solution. It compares
+community value (`cost_R - cost_I/C`) and total imports above the hourly cap for R, I, and C. It varies the
+discount from 0 to 1, the penalty from `(1 - beta) x import tariff` through the base penalty, and the cap
+factor from 0.25 until the reference imports are below the cap in every hour. The three two-panel plots and
+`Sensitivity_Results.csv` are saved under `results/base_sensitivity/`; the CSV contains costs, values against R,
+and daily import exceedance in kWh.
 
 ## 2. Repository structure
 

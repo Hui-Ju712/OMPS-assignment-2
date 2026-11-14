@@ -19,7 +19,7 @@ from pathlib import Path
 from src.data_loader import load_community, list_communities
 from src.model import EnergyCommunityModel
 from src.plotting import plot_community_schedule
-from src.sensitivity import run_cap_sensitivity, run_discount_sensitivity, run_penalty_sensitivity
+from src.sensitivity import run_sensitivity_study
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -96,6 +96,7 @@ def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
     print("Model C Internal Prices:")
     for hour, price in enumerate(res_c["internal_prices"]):
         print(f"Hour {hour:02d}: {price:.3f} DKK/kWh")
+    return model_r, res_r
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -121,13 +122,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Execute the Q1 experiment
-    run_q1_base_comparison(com, out_dir)
+    model_r, res_r = run_q1_base_comparison(com, out_dir)
     if args.sensitivity:
         sensitivity_dir = RESULTS_DIR / "base_sensitivity"
         sensitivity_dir.mkdir(parents=True, exist_ok=True)
-        run_discount_sensitivity(com, sensitivity_dir)
-        run_penalty_sensitivity(com, sensitivity_dir)
-        run_cap_sensitivity(com, sensitivity_dir)
+        run_sensitivity_study(com, sensitivity_dir, reference_model=model_r, reference_result=res_r)
         print(f"Sensitivity analysis complete. Check the '{sensitivity_dir.relative_to(Path.cwd())}' folder for plots.")
     if args.demo:
         import runpy
