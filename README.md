@@ -56,12 +56,9 @@ python main.py --demo           # ... plus the scenario-generation demonstration
 python main.py --sensitivity    # ... plus contract value and DSO congestion sensitivities
 ```
 
-The sensitivity study uses Model R as the no-contract reference, reusing its base-case solution. It compares
-community value (`cost_R - cost_I/C`) and total imports above the hourly cap for R, I, and C. It varies the
-discount from 0 to 1, the penalty from `(1 - beta) x import tariff` through the base penalty, and the cap
-factor from 0.25 until the reference imports are below the cap in every hour. The three two-panel plots and
-`Sensitivity_Results.csv` are saved under `results/base_sensitivity/`; the CSV contains costs, values against R,
-and daily import exceedance in kWh.
+With `--sensitivity`, the Q1 study varies contract discount, penalty, and cap factor. It saves plots and
+`Sensitivity_Results.csv` under `results/base_sensitivity/`.
+
 
 ## 2. Repository structure
 
