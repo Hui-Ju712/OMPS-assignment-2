@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any 
 
@@ -83,4 +84,26 @@ def plot_community_schedule(
     
     fig.suptitle(f"{title} - Mode {model_obj.mode} (Cost: {results_dict['objective_value']:.2f} DKK)")
     
+    return _finish(fig, save_to)
+
+
+def plot_sensitivity(
+    x_values: Sequence[float],
+    costs_by_model: dict[str, Sequence[float]],
+    xlabel: str,
+    title: str,
+    save_to: Path | str,
+) -> plt.Figure:
+    """Plot optimized costs across sensitivity values for each model."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    markers = {"Model R (Reference)": "^", "Model I (Individual)": "o", "Model C (Community)": "s"}
+
+    for label, costs in costs_by_model.items():
+        ax.plot(x_values, costs, marker=markers.get(label, "o"), label=label)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Total Daily Cost (DKK)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend()
     return _finish(fig, save_to)
