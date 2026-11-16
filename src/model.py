@@ -1,3 +1,5 @@
+import math
+
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
@@ -6,6 +8,8 @@ from typing import Dict, Any
 
 from src.data_loader import CommunityData
 
+DEVICE_KEYS = ("load", "pv", "dev", "p_ch", "p_dis", "soc")
+
 class EnergyCommunityModel:
     """
     General optimization model for Assignment 2.
@@ -13,13 +17,17 @@ class EnergyCommunityModel:
       - "R": Reference (no contract, independent scheduling)
       - "I": Individual (individual contracts, independent scheduling)
       - "C": Central / Community (community contract, central dispatch)
-      - "DP": Dynamic Pricing (placeholder for Question 2)
+      - "DP": Dynamic Pricing (optimistic KKT/SOS1 reformulation, Question 2)
     """
 
     def __init__(self, data: CommunityData, mode: str = "C", config: dict = None, verbose: bool = False):
         self.data = data
         self.mode = mode.upper()
         self.config = config or {}
+        if self.mode not in {"R", "I", "C", "DP"}:
+            raise ValueError(f"Unknown model mode: {self.mode}")
+        if self.config.get("daily_energy_rule", "fixed") not in {"fixed", "minimum"}:
+            raise ValueError("daily_energy_rule must be 'fixed' or 'minimum'")
         
         # Allow overriding default contract terms via config (useful for sensitivity analysis)
         self.discount = self.config.get("discount", self.data.contract.tariff_discount_ratio)
@@ -30,6 +38,13 @@ class EnergyCommunityModel:
 
         self.m = gp.Model(f"EnergyCommunity_{self.mode}")
         self.m.Params.OutputFlag = 1 if verbose else 0
+        if self.mode == "DP":
+            self.m.Params.TimeLimit = self.config.get("time_limit", 300.0)
+            self.m.Params.MIPGap = self.config.get("mip_gap", 1e-4)
+            if not 0 <= self.discount <= 1 or self.cap_factor < 0:
+                raise ValueError("DP requires discount in [0, 1] and nonnegative cap_factor")
+            if self.penalty < (1 - self.discount) * self.data.import_tariff:
+                raise ValueError("The continuous import split requires penalty >= discounted import tariff")
         
         self.T = range(24) # 24-hour horizon
         self.members = self.data.members
@@ -42,9 +57,128 @@ class EnergyCommunityModel:
         """Sequentially build variables, constraints, and the objective function."""
         self._build_variables()
         self._build_device_constraints() # Base asset constraints (shared across R, I, C)
+        self.m.update()
+        device_rows = list(self.m.getConstrs())
         self._build_grid_constraints()   # Grid and contract constraints (differs by mode)
         self._build_objective()          # Objective function (differs by mode)
         self.m.update()
+        if self.mode == "DP":
+            self._build_pricing_conditions(device_rows)
+            self.m.update()
+
+    def _build_pricing_conditions(self, device_rows):
+        """Attach linear stationarity, SOS1 complementarity and settlement switches."""
+        m = self.m
+        config = self.config
+        bounds = config.get("price_bounds", (None, None))
+        if len(bounds) != 2:
+            raise ValueError("price_bounds must be (lower, upper); use None for an unbounded side")
+        lower, upper = bounds
+        lower = -GRB.INFINITY if lower is None else float(lower)
+        upper = GRB.INFINITY if upper is None else float(upper)
+        if math.isnan(lower) or math.isnan(upper) or lower > upper:
+            raise ValueError("Invalid price_bounds")
+        prices = m.addVars(self.T, lb=lower, ub=upper, name="lambda")
+        self.var["lambda"] = prices
+
+        # Settlement constraints can otherwise make wasteful grid loops or voluntary
+        # above-cap classification useful for absorbing surplus. Metered flows and
+        # exceedance must remain physical, even when budget balance is imposed.
+        self.var["cap_slack"] = m.addVars(self.T, lb=0.0, name="unused_cap")
+        for t in self.T:
+            m.addConstr(self.var["cap_slack"][t] == self.cap_limit[t] - self.var["P_below"][t],
+                        name=f"unused_cap_definition_{t}")
+            m.addSOS(GRB.SOS_TYPE1, [self.var["P_imp"][t], self.var["P_exp"][t]])
+            m.addSOS(GRB.SOS_TYPE1, [self.var["P_exc"][t], self.var["cap_slack"][t]])
+
+        # All source variables are free; the original device rows contain their bounds.
+        index_to_member = {}
+        stationarity = {}
+        for i, member in enumerate(self.members):
+            for key in DEVICE_KEYS:
+                for t in self.T:
+                    variable = self.var[key][i, t]
+                    if variable.LB > -GRB.INFINITY or variable.UB < GRB.INFINITY:
+                        raise ValueError("Follower bounds must be explicit device constraints")
+                    index_to_member[variable.index] = i
+                    stationarity[variable.index] = gp.LinExpr()
+        dual_objectives = {i: gp.LinExpr() for i in range(len(self.members))}
+        self.member_kkt = []
+
+        # Normalize each inequality to a*x >= b, with dual y >= 0.
+        # Equalities use the same orientation and an unrestricted dual.
+        for row_constraint in device_rows:
+            row = m.getRow(row_constraint)
+            indices = [row.getVar(j).index for j in range(row.size())]
+            members = {index_to_member[j] for j in indices}
+            if len(members) != 1:
+                raise ValueError("A follower device row must belong to exactly one member")
+            i = members.pop()
+            equality = row_constraint.Sense == "="
+            sign = -1.0 if row_constraint.Sense == "<" else 1.0
+            rhs = sign * row_constraint.RHS
+            dual = m.addVar(lb=-GRB.INFINITY if equality else 0.0,
+                            name=f"dual_{row_constraint.ConstrName}")
+            for j in range(row.size()):
+                stationarity[indices[j]] += sign * row.getCoeff(j) * dual
+            dual_objectives[i] += rhs * dual
+            slack = None
+            if not equality:
+                slack = m.addVar(lb=0.0, name=f"slack_{row_constraint.ConstrName}")
+                m.addConstr(slack == sign * row - rhs,
+                            name=f"slack_definition_{row_constraint.ConstrName}")
+                m.addSOS(GRB.SOS_TYPE1, [dual, slack])
+            self.member_kkt.append({"member": i, "row": row_constraint,
+                                    "dual": dual, "slack": slack})
+
+        self.member_operating_cost = {}
+        self.member_payment = {}
+        self.member_total_cost = {}
+        self.con["member_stationarity"] = {}
+        for i, member in enumerate(self.members):
+            self.member_operating_cost[i] = gp.quicksum(
+                member.linear_disutility * self.var["dev"][i, t]
+                + member.pv_marginal_cost * self.var["pv"][i, t]
+                for t in self.T
+            )
+            for key in DEVICE_KEYS:
+                for t in self.T:
+                    coefficient = {
+                        "load": prices[t], "pv": member.pv_marginal_cost - prices[t],
+                        "dev": member.linear_disutility, "p_ch": prices[t],
+                        "p_dis": -prices[t], "soc": 0.0,
+                    }[key]
+                    variable = self.var[key][i, t]
+                    self.con["member_stationarity"][i, key, t] = m.addConstr(
+                        stationarity[variable.index] == coefficient,
+                        name=f"stationarity_{i}_{key}_{t}",
+                    )
+            # Strong duality at a KKT point: payment = dual value - operating cost.
+            self.member_payment[i] = dual_objectives[i] - self.member_operating_cost[i]
+            self.member_total_cost[i] = dual_objectives[i]
+
+        self.external_grid_cost = m.getObjective() - gp.quicksum(
+            self.member_operating_cost.values()
+        )
+        if config.get("budget_balance", False):
+            self.con["budget_balance"] = m.addConstr(
+                gp.quicksum(self.member_payment.values()) == self.external_grid_cost,
+                name="budget_balance",
+            )
+        if config.get("individual_rationality", False):
+            benchmarks = config.get("benchmark_costs")
+            ids = {member.consumer_id for member in self.members}
+            if benchmarks is None or not ids.issubset(benchmarks):
+                raise ValueError("IR requires benchmark_costs mapping every consumer ID to its outside cost")
+            self.con["individual_rationality"] = {}
+            for i, member in enumerate(self.members):
+                value = float(benchmarks[member.consumer_id])
+                if not math.isfinite(value):
+                    raise ValueError("Every benchmark cost must be finite")
+                self.con["individual_rationality"][i] = m.addConstr(
+                    self.member_total_cost[i] <= value,
+                    name=f"individual_rationality_{member.consumer_id}",
+                )
 
     def _build_variables(self):
         """Declare all decision variables with lb=-GRB.INFINITY for KKT dual extraction."""
@@ -68,7 +202,7 @@ class EnergyCommunityModel:
                 self.var["q_below"] = self.m.addVars(len(self.members), 24, lb=-GRB.INFINITY, name="q_below")
                 self.var["q_exc"] = self.m.addVars(len(self.members), 24, lb=-GRB.INFINITY, name="q_exc")
                 
-        elif self.mode == "C":
+        elif self.mode in {"C", "DP"}:
             # Mode C: The community shares a single meter at the connection point
             self.var["P_imp"] = self.m.addVars(24, lb=-GRB.INFINITY, name="P_imp")
             self.var["P_exp"] = self.m.addVars(24, lb=-GRB.INFINITY, name="P_exp")
@@ -90,7 +224,15 @@ class EnergyCommunityModel:
             self.con[f"l_max_{i}"] = self.m.addConstrs((l[i, t] <= m_data.load_upper_kWh[t] for t in self.T), name=f"l_max_{i}")
             
             # 2. Daily minimum energy requirement
-            self.con[f"E_min_{i}"] = self.m.addConstr(gp.quicksum(l[i, t] for t in self.T) == m_data.min_daily_energy_kWh, name=f"E_min_{i}")
+            daily_energy = gp.quicksum(l[i, t] for t in self.T)
+            # Preserve the Q1 fixed-energy convention by default; minimum is selectable
+            # in every mode so that C and DP always use identical feasible sets.
+            energy_constraint = (
+                daily_energy >= m_data.min_daily_energy_kWh
+                if self.config.get("daily_energy_rule", "fixed") == "minimum"
+                else daily_energy == m_data.min_daily_energy_kWh
+            )
+            self.con[f"E_min_{i}"] = self.m.addConstr(energy_constraint, name=f"E_min_{i}")
             
             # 3. Linearization of absolute deviation for disutility (dev >= |l - l_ref|)
             self.con[f"dev_pos_{i}"] = self.m.addConstrs((dev[i, t] >= l[i, t] - m_data.reference_load[t] for t in self.T), name=f"dev_pos_{i}")
@@ -168,7 +310,7 @@ class EnergyCommunityModel:
                     self.con[f"imp_split_{i}"] = self.m.addConstrs((q_imp[i, t] == q_below[i, t] + q_exc[i, t] for t in self.T), name=f"imp_split_{i}")
                     self.con[f"cap_indiv_{i}"] = self.m.addConstrs((q_below[i, t] <= individual_cap[t] for t in self.T), name=f"cap_indiv_{i}")
 
-        elif self.mode == "C":
+        elif self.mode in {"C", "DP"}:
             P_imp = self.var["P_imp"]
             P_exp = self.var["P_exp"]
             P_below = self.var["P_below"]
@@ -227,7 +369,7 @@ class EnergyCommunityModel:
                     for t in self.T
                 )
                 
-        elif self.mode == "C":
+        elif self.mode in {"C", "DP"}:
             P_imp = self.var["P_imp"]
             P_exp = self.var["P_exp"]
             P_below = self.var["P_below"]
@@ -246,12 +388,19 @@ class EnergyCommunityModel:
         """Solve the optimization model and return the results, including dual variables."""
         self.m.optimize()
         
-        if self.m.Status != GRB.OPTIMAL:
+        if self.m.SolCount == 0:
+            raise RuntimeError(
+                f"Model has no solution. Status code: {self.m.Status} "
+                "(3=infeasible, 4=infeasible or unbounded, 9=time limit)."
+            )
+        if self.mode != "DP" and self.m.Status != GRB.OPTIMAL:
             raise RuntimeError(f"Model did not solve optimally. Status code: {self.m.Status}")
             
         results = {
             "objective_value": self.m.ObjVal,
-            "status": "Optimal"
+            "status": "Optimal" if self.m.Status == GRB.OPTIMAL else "Feasible incumbent",
+            "solver_status": self.m.Status,
+            "runtime_seconds": self.m.Runtime,
         }
         
         # Extract internal clearing prices for Model C before calculating settlements.
@@ -263,6 +412,14 @@ class EnergyCommunityModel:
                 # so the equality dual is the positive marginal price.
                 internal_prices.append(self.con["community_balance"][t].Pi)
             results["internal_prices"] = internal_prices
+
+        if self.mode == "DP":
+            internal_prices = [self.var["lambda"][t].X for t in self.T]
+            results["internal_prices"] = internal_prices
+            results["mip_gap"] = self.m.MIPGap
+            results["objective_bound"] = self.m.ObjBound
+            from src.pricing import pricing_diagnostics
+            results.update(pricing_diagnostics(self, internal_prices))
 
         results.update(self._cost_breakdown(internal_prices))
             
@@ -298,7 +455,7 @@ class EnergyCommunityModel:
                 )
                 consumer_costs[member.consumer_id] = internal_cost + grid_cost
 
-        if self.mode == "C":
+        if self.mode in {"C", "DP"}:
             external_grid_cost = sum(
                 self.data.energy_price[t] * self.var["P_imp"][t].X
                 - (self.data.energy_price[t] - (1 - self.discount) * self.data.export_tariff) * self.var["P_exp"][t].X
