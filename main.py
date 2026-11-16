@@ -1,20 +1,22 @@
-"""Entry point of the Assignment 2 starter package: load a community and summarize it.
+"""Run Assignment 2 experiments from one entry point.
 
-    python main.py                                   # base case (16 members), day d1
-    python main.py --sensitivity                     # run the sensitivity analyses (discount, penalty, capacity)
-    python main.py --community my_mix                # your own data/params_community_my_mix.json
-    python main.py --day d4                          # another day of the week (and that day's cap)
-    python main.py --members                         # also print every member's Assignment 1 summary
-    python main.py --demo                            # also run the scenario-generation demonstration (Question 3)
-
-No model is provided: build your Assignment 1 model class on the ``InputData`` of each member, then the community
-models of the assignment (R, I, C, DP, ...) on top of it, one function per experiment, writing to ``results/``.
+    python main.py                                  # Q1 base comparison (R, I, C)
+    python main.py --sensitivity                    # Q1 plus contract sensitivity studies
+    python main.py --question 2                     # Q2 pricing model, cap-only variant
+    python main.py --question 2 --variant bb        # Q2 with budget balance
+    python main.py --question 2 --variant ir        # Q2 with budget balance and individual rationality
+    python main.py --community my_mix --day d4      # select community and day
+    python main.py --members                        # also print all members' summaries
+    python main.py --demo                           # also run the Q3 scenario demonstration
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
+
+import gurobipy as gp
 
 from src.data_loader import load_community, list_communities
 from src.model import EnergyCommunityModel
@@ -98,14 +100,97 @@ def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
         print(f"Hour {hour:02d}: {price:.3f} DKK/kWh")
     return model_r, res_r
 
-def main() -> None:
+def _solve_model(data, mode, config, verbose):
+    model = EnergyCommunityModel(data, mode=mode, config=config, verbose=verbose)
+    model.build_model()
+    return model, model.solve()
+
+
+def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
+    """Run the selected pricing variant with the same community data as Q1."""
+    common = {"cap_factor": args.cap_factor, "daily_energy_rule": args.daily_energy_rule}
+    if args.discount is not None:
+        common["discount"] = args.discount
+    if args.penalty is not None:
+        common["penalty"] = args.penalty
+    config = dict(common, budget_balance=args.variant in {"bb", "ir"},
+                  individual_rationality=args.variant == "ir",
+                  price_bounds=(args.price_min, args.price_max),
+                  time_limit=args.time_limit, mip_gap=args.mip_gap)
+    references = {}
+    # IR outside options are recalculated under the same contract and daily-energy rule.
+    if args.variant == "ir":
+        modes = ("R", "I") if args.ir_reference == "both" else (args.ir_reference,)
+        for mode in modes:
+            _, references[mode] = _solve_model(data, mode, common, args.verbose)
+        config["benchmark_costs"] = {
+            member.consumer_id: min(result["consumer_costs"][member.consumer_id]
+                                    for result in references.values())
+            for member in data.members
+        }
+    model = EnergyCommunityModel(data, mode="DP", config=config, verbose=args.verbose)
+    model.build_model()
+    if args.export_model:
+        args.export_model.parent.mkdir(parents=True, exist_ok=True)
+        model.m.write(str(args.export_model))
+        print(f"Exported {model.m.NumVars} variables, {model.m.NumConstrs} rows, "
+              f"{model.m.NumSOS} SOS1 constraints to {args.export_model}")
+        return
+    _, central = _solve_model(data, "C", common, args.verbose)
+    result = model.solve()
+    output = args.output_dir or results_dir / args.community / f"Q2_{args.day}_{args.variant}"
+    output.mkdir(parents=True, exist_ok=True)
+    report = {"configuration": config, "day": args.day,
+              "solution_concept": "optimistic", "DP": result, "C": central,
+              "outside_options": references,
+              "cost_above_C_DKK": result["objective_value"] - central["objective_value"]}
+    if "benchmark_costs" in config:
+        report["individual_gains_DKK"] = {
+            cid: benchmark - result["consumer_costs"][cid]
+            for cid, benchmark in config["benchmark_costs"].items()
+        }
+    (output / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    with (output / "schedule.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["hour", "internal_price_DKK_per_kWh", "import_kW", "export_kW",
+                         "cap_kW", "exceedance_kW"])
+        for t in model.T:
+            writer.writerow([t, result["internal_prices"][t], model.var["P_imp"][t].X,
+                             model.var["P_exp"][t].X, model.cap_limit[t],
+                             model.var["P_exc"][t].X])
+    print(f"DP: {result['objective_value']:.6f} DKK ({result['status']}, "
+          f"gap {result['mip_gap']:.3g}); C: {central['objective_value']:.6f} DKK")
+    print(f"Manager balance: {result['manager_balance']:.6f} DKK")
+    print(f"Results: {output}")
+
+def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--community", default="base", help=f"base (shipped) or your own params_community_<name>.json; available: {list_communities()}")
     ap.add_argument("--day", default="d1", help="d1 (base case) ... d7")
     ap.add_argument("--members", action="store_true", help="print the Assignment 1 summary of every member")
     ap.add_argument("--demo", action="store_true", help="run the scenario-generation demonstration")
     ap.add_argument("--sensitivity", action="store_true", help="run tariff, penalty, and capacity sensitivity analyses")
-    args = ap.parse_args()
+    ap.add_argument("--question", type=int, choices=(1, 2), default=1,
+                    help="experiment to run (default: 1, the existing Q1 comparison)")
+    q2 = ap.add_argument_group("Question 2 options (use with --question 2)")
+    q2.add_argument("--variant", choices=("cap", "bb", "ir"), default="cap")
+    q2.add_argument("--ir-reference", choices=("R", "I", "both"), default="both")
+    q2.add_argument("--discount", type=float)
+    q2.add_argument("--penalty", type=float)
+    q2.add_argument("--cap-factor", type=float, default=1.0)
+    q2.add_argument("--price-min", type=float)
+    q2.add_argument("--price-max", type=float)
+    q2.add_argument("--daily-energy-rule", choices=("fixed", "minimum"), default="fixed")
+    q2.add_argument("--time-limit", type=float, default=300.0)
+    q2.add_argument("--mip-gap", type=float, default=1e-4)
+    q2.add_argument("--export-model", type=Path, help="write the DP LP/SOS model without solving")
+    q2.add_argument("--output-dir", type=Path)
+    q2.add_argument("--verbose", action="store_true")
+    args = ap.parse_args(argv)
+    if args.question == 2 and args.sensitivity:
+        ap.error("--sensitivity runs the Q1 studies; use --question 1 (the default)")
+    if args.question == 1 and args.export_model:
+        ap.error("--export-model requires --question 2")
 
     com = load_community(args.community, day=args.day)
     print(com.summary(), "\n")
@@ -116,13 +201,14 @@ def main() -> None:
     ic = com.contract.individual_capacity_limit_kW
     print("Individual caps in model I (kW), hour 0 / hour 11:",
           "  ".join(f"{cid} ({com.member(cid).archetype}) {ic[cid][0]:.2f}/{ic[cid][11]:.2f}" for cid in ("C1", "C1_PVB", "C4", "C4_PVB") if cid in com.member_ids))
-    (RESULTS_DIR / args.community).mkdir(parents=True, exist_ok=True)
-
     out_dir = RESULTS_DIR / args.community
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Execute the Q1 experiment
-    model_r, res_r = run_q1_base_comparison(com, out_dir)
+    if args.question == 1:
+        model_r, res_r = run_q1_base_comparison(com, out_dir)
+    else:
+        run_q2_pricing(com, args, RESULTS_DIR)
+
     if args.sensitivity:
         sensitivity_dir = RESULTS_DIR / "base_sensitivity"
         sensitivity_dir.mkdir(parents=True, exist_ok=True)
@@ -134,4 +220,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except gp.GurobiError as error:
+        if error.errno == 10010:
+            raise SystemExit(
+                "The model exceeds the restricted Gurobi licence. Activate an academic licence. "
+                "To inspect Q2 without solving, run: python main.py --question 2 "
+                "--variant cap --export-model results/Q2_DP.lp"
+            ) from error
+        raise
