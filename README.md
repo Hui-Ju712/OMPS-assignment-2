@@ -50,7 +50,7 @@ conditions, big-M or SOS1 complementarity, strong-duality linearization of the p
 
 ### 1.3 Check that everything works
 ```bash
-python main.py                  # loads the base case (16 members, day d1) and prints a summary
+python main.py                  # Q1 base comparison (R, I, C), with plots and cost CSV
 python main.py --members        # ... plus the Assignment 1 summary of every member
 python main.py --demo           # ... plus the scenario-generation demonstration (Question 3)
 ```
@@ -309,3 +309,28 @@ As in Assignment 1: keep data loading, model building, solving and plotting sepa
 and save its outputs under `results/`; fix and report the seeds of every scenario set; and commit regularly with
 meaningful messages - the git history is also a record of everyone's contribution. The graders should be able to open
 the code, follow this README, and reproduce every number and figure of the report.
+
+## Question 2: dynamic-pricing manager (Step 2)
+
+The implemented `mode="DP"` chooses uniform hourly prices and anticipates members'
+LP-optimal responses through KKT conditions and SOS1 complementarity. The manager
+minimizes community cost; member payments are linearized using strong duality.
+Optional switches impose exact budget balance and member-level individual
+rationality. The solution concept is optimistic when responses are not unique.
+
+```bash
+python main.py --question 2 --variant cap
+python main.py --question 2 --variant bb
+python main.py --question 2 --variant ir --ir-reference both
+python main.py --question 2 --variant cap --export-model results/Q2_DP.lp
+```
+
+Full runs require an academic Gurobi licence. Cap-only model export works
+with the restricted licence. Results include prices, member costs,
+manager balance, the C comparison, optimality gap and KKT/payment checks, written
+to `results/<community>/Q2_<day>_<variant>/`. Use `--output-dir` for distinct
+parameter studies. Running `python main.py` still executes the existing Q1 comparison;
+`python main.py --sensitivity` retains the Q1 sensitivity studies.
+
+The existing fixed daily-energy convention is preserved by default; `--daily-energy-rule minimum` applies the
+minimum-energy inequality consistently to DP and its comparisons.
