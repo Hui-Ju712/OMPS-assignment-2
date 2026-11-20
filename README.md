@@ -327,16 +327,28 @@ Optional switches impose exact budget balance and member-level individual
 rationality. The solution concept is optimistic when responses are not unique.
 
 ```bash
+python main.py --question 2 --variant all   # run and save all three variants
 python main.py --question 2 --variant cap
 python main.py --question 2 --variant bb
 python main.py --question 2 --variant ir --ir-reference both
-python main.py --question 2 --variant cap --export-model results/Q2_DP.lp
+python main.py --question 2 --variant cap --export-model results/Q2_DP_cap.lp
 ```
 
 Full runs require an academic Gurobi licence. Cap-only model export works
-with the restricted licence. Results include prices, member costs,
-manager balance, the C comparison, optimality gap and KKT/payment checks, written
-to `results/<community>/Q2_<day>_<variant>/`. Use `--output-dir` for distinct
+with the restricted licence. `run_q2_pricing()` in `main.py` solves the models,
+and `save_q2_results()` writes the solver results directly to CSV:
+
+- `summary.csv`: R/I/C and selected DP costs, manager balance, flexibility metrics,
+  solver status/gap, KKT checks and experiment settings.
+- `member_costs.csv`: member costs and gains against R, I and the best outside option.
+- `schedule.csv`: hourly community import/export, cap, exceedance and prices.
+- `members_schedule.csv`: hourly load, PV, battery and deviation values per member.
+
+These files are saved to `results/<community>/Q2_<day>_<variant>/`. No JSON result
+files are produced. Infeasible or time-limited runs without an incumbent get a
+status row with blank costs and no invented schedule. `--variant all` reuses the
+same R/I/C benchmarks and updates the CSVs after each DP solve.
+Use `--output-dir` for distinct
 parameter studies. Running `python main.py` still executes the existing Q1 comparison;
 `python main.py --sensitivity` retains the Q1 sensitivity studies.
 
