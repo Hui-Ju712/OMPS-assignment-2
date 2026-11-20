@@ -1,0 +1,11 @@
+metric,unit,definition,reference_and_sign
+Community cost,DKK/day,External grid bill plus all member operating/discomfort costs; excludes internal transfers,C is the efficiency benchmark
+Saving vs R / I,DKK/day,C_R-C_M / C_I-C_M,Positive means the community gains
+C value recovered,%,100*(C_R-C_M)/(C_R-C_C),Undefined unless C_R>C_C; 100% recovers C's saving
+Cap exceedance,kWh/day,"sum_t max(0,import_t-cap_t)*1 hour",R/I: sum of member imports; C/DP: connection-point import
+Peak import,kW,max_t import_t,Compare with R and C
+Member gain,DKK/day,outside_cost_i - member_cost_i,"Outside cost is R, I, or min(R,I), as selected"
+Observed shortfall,DKK/day,"max(0,member_cost_i-outside_cost_i)","Compensation needed at this settlement, not a global minimum"
+Manager balance,DKK/day,member payments collected - external grid bill,Zero is exact budget balance
+Added requirement cost,DKK/day,observed cost after requirement - observed cost before,Only compare available solutions; check solver gaps
+Fixed-dispatch minimum shortfall,DKK/day,"min sum_i v_i, cost_i<=outside_cost_i+v_i, with exact BB and fixed device schedules",Diagnostic only: prices reoptimized; dispatch fixed; not a global blocking-member proof

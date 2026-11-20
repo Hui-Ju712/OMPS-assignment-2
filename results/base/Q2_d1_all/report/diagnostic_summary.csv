@@ -1,0 +1,2 @@
+scope,source_model,price_scope,IR_reference,status,total_shortfall_DKK,objective_bound_DKK,input_signature,interpretation
+fixed-dispatch repricing only,DP_bb,uniform,both,Optimal,93.43702701539225,93.43702701539225,34668cd7dfd0181a5afe7039b2c4bae34b05a669e85d508876d6ae0007af1be3,One minimum-shortfall allocation at fixed dispatch; not a global blocker proof.
