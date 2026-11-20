@@ -388,6 +388,22 @@ class EnergyCommunityModel:
         """Solve the optimization model and return the results, including dual variables."""
         self.m.optimize()
         
+        if self.m.SolCount == 0 and self.mode == "DP":
+            statuses = {
+                GRB.INFEASIBLE: "Infeasible",
+                GRB.INF_OR_UNBD: "Infeasible or unbounded",
+                GRB.TIME_LIMIT: "Time limit: no feasible solution found",
+                GRB.INTERRUPTED: "Interrupted: no feasible solution found",
+            }
+            bound = self.m.ObjBound
+            return {
+                "objective_value": None,
+                "status": statuses.get(self.m.Status, "No feasible solution found"),
+                "solver_status": self.m.Status,
+                "runtime_seconds": self.m.Runtime,
+                "objective_bound": bound if math.isfinite(bound) and abs(bound) < GRB.INFINITY else None,
+                "mip_gap": None,
+            }
         if self.m.SolCount == 0:
             raise RuntimeError(
                 f"Model has no solution. Status code: {self.m.Status} "
