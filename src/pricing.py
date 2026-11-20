@@ -18,7 +18,8 @@ def pricing_diagnostics(owner, prices):
     payment_residual = 0.0
     payments = {}
     for i, member in enumerate(owner.members):
-        direct = sum(prices[t] * (
+        member_prices = prices[member.consumer_id] if isinstance(prices, dict) else prices
+        direct = sum(member_prices[t] * (
             owner.var["load"][i, t].X + owner.var["p_ch"][i, t].X
             - owner.var["pv"][i, t].X - owner.var["p_dis"][i, t].X
         ) for t in owner.T)

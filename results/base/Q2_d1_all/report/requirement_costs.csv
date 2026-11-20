@@ -1,0 +1,4 @@
+step,reference,observed_increment_DKK,status,price_scope_changed,interpretation
+DP_cap,C,1.7053025658242404e-13,Optimal,False,Observed incumbent difference; check solver status/gap
+DP_bb,DP_cap,0.0,Optimal,False,Observed incumbent difference; check solver status/gap
+DP_ir_individual,DP_bb,-5.684341886080802e-14,Optimal,True,Joint change: add IR and use individual prices; not an isolated cost of IR

@@ -139,6 +139,7 @@ def save_q2_results(models, results, output, args):
             "payment_identity_residual": result.get("payment_identity_residual"),
             "system_cost_check_DKK": result.get("system_cost_check"),
             "day": args.day, "daily_energy_rule": args.daily_energy_rule,
+            "price_scope": model.config.get("price_scope", "uniform"),
             "discount": model.discount, "penalty_DKK_per_kWh": model.penalty,
             "cap_factor": model.cap_factor, "IR_reference": args.ir_reference,
             "price_min": args.price_min, "price_max": args.price_max,
@@ -184,6 +185,10 @@ def save_q2_results(models, results, output, args):
                     for key in ("load", "pv", "p_ch", "p_dis", "soc", "dev"):
                         row[key] = model.var[key][i, t].X
                     row["net_consumption_kWh"] = row["load"] + row["p_ch"] - row["pv"] - row["p_dis"]
+                    prices = result.get("internal_prices_by_member", {}).get(
+                        cid, result.get("internal_prices", [None] * 24)
+                    )
+                    row["internal_price_DKK_per_kWh"] = prices[t]
                     member_schedules.append(row)
             summary.update(
                 peak_import_kW=max(imports), daily_import_kWh=sum(imports),
@@ -205,6 +210,12 @@ def save_q2_results(models, results, output, args):
             writer.writerows(rows)
 
 
+def q2_output_directory(args, results_dir=RESULTS_DIR):
+    scope = "individual" if args.variant == "ir" else (args.price_scope or "uniform")
+    suffix = "_individual" if scope == "individual" else ""
+    return args.output_dir or results_dir / args.community / f"Q2_{args.day}_{args.variant}{suffix}"
+
+
 def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
     """Solve Q2 and save CSVs directly from the returned results and model variables."""
     common = {"cap_factor": args.cap_factor, "daily_energy_rule": args.daily_energy_rule}
@@ -219,6 +230,7 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
         config = dict(common, budget_balance=variant in {"bb", "ir"},
                       individual_rationality=variant == "ir",
                       price_bounds=(args.price_min, args.price_max),
+                      price_scope="individual" if variant == "ir" else (args.price_scope or "uniform"),
                       time_limit=args.time_limit, mip_gap=args.mip_gap)
         if variant == "ir":
             references = ("R", "I") if args.ir_reference == "both" else (args.ir_reference,)
@@ -241,11 +253,11 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
 
     for mode in ("R", "I", "C"):
         models[mode], results[mode] = _solve_model(data, mode, common, args.verbose)
-    output = args.output_dir or results_dir / args.community / f"Q2_{args.day}_{args.variant}"
+    output = q2_output_directory(args, results_dir)
     if not args.export_model:
         save_q2_results(models, results, output, args)
     for variant in variants:
-        label = f"DP_{variant}"
+        label = "DP_ir_individual" if variant == "ir" else f"DP_{variant}"
         model = EnergyCommunityModel(data, mode="DP", config=configuration(variant),
                                      verbose=args.verbose)
         model.build_model()
@@ -255,6 +267,9 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
             print(f"Exported model to {args.export_model}")
             return
         models[label] = model
+        if model.config.get("price_scope") == "individual":
+            supported = model.warm_start_from_central(models["C"])
+            print(f"{label}: central-dispatch pricing start {'found' if supported else 'not found'}")
         results[label] = model.solve()
         # Checkpoint each solve, including infeasible/time-limit runs with no incumbent.
         save_q2_results(models, results, output, args)
@@ -262,6 +277,8 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
         cost_text = f"{cost:.6f} DKK" if cost is not None else "no feasible solution found"
         print(f"{label}: {cost_text} ({results[label]['status']})")
     print(f"CSV results saved by save_q2_results(): {output}")
+    from src.q2_reporting import generate_q2_report
+    generate_q2_report(output, args.compare_results, args.diagnose_ir, args.community)
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -274,6 +291,8 @@ def main(argv=None) -> None:
                     help="experiment to run (default: 1, the existing Q1 comparison)")
     q2 = ap.add_argument_group("Question 2 options (use with --question 2)")
     q2.add_argument("--variant", choices=("cap", "bb", "ir", "all"), default="cap")
+    q2.add_argument("--price-scope", choices=("uniform", "individual"), default=None,
+                    help="cap/BB pricing scope (default: uniform); IR always uses individual prices")
     q2.add_argument("--ir-reference", choices=("R", "I", "both"), default="both")
     q2.add_argument("--discount", type=float)
     q2.add_argument("--penalty", type=float)
@@ -286,7 +305,22 @@ def main(argv=None) -> None:
     q2.add_argument("--export-model", type=Path, help="write the DP LP/SOS model without solving")
     q2.add_argument("--output-dir", type=Path)
     q2.add_argument("--verbose", action="store_true")
+    q2.add_argument("--report-only", action="store_true",
+                    help="create plots and tables from saved CSVs without rerunning DP")
+    q2.add_argument("--compare-results", type=Path, action="append", default=[],
+                    help="also compare an existing Q2 result folder; repeat for several folders")
+    q2.add_argument("--diagnose-ir", action="store_true",
+                    help="minimize participation shortfalls by repricing the saved fixed BB/C dispatch")
     args = ap.parse_args(argv)
+    if args.variant == "ir" and args.price_scope == "uniform":
+        ap.error("The IR variant now uses individual prices; omit --price-scope or use individual")
+    if args.report_only:
+        if args.question != 2 or args.export_model:
+            ap.error("--report-only requires --question 2 and cannot be combined with --export-model")
+        from src.q2_reporting import generate_q2_report
+        generate_q2_report(q2_output_directory(args), args.compare_results,
+                           args.diagnose_ir, args.community)
+        return
     if args.variant == "all" and args.export_model:
         ap.error("--export-model needs a single variant: cap, bb or ir")
     if args.question == 2 and args.sensitivity:
