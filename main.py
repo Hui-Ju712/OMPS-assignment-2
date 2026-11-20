@@ -6,6 +6,7 @@
     python main.py --question 2 --variant bb                    # Q2 with budget balance
     python main.py --question 2 --variant ir                    # Q2 with budget balance and hard IR
     python main.py --question 2 --variant ir --soft-ir --price-min 0.01  # Q2 with lexicographic Soft IR
+    python main.py --plot-q2-comparison --community base --day d1 #plot consumer cost comparison for Q2 variants from existing results
     python main.py --community my_mix --day d4                  # select community and day
     python main.py --members                                    # also print all members' summaries
     python main.py --demo                                       # also run the Q3 scenario demonstration
@@ -21,7 +22,11 @@ import gurobipy as gp
 
 from src.data_loader import load_community, list_communities
 from src.model import EnergyCommunityModel
-from src.plotting import plot_community_schedule, plot_consumer_cost_comparison
+from src.plotting import (
+    plot_community_schedule,
+    plot_consumer_cost_comparison,
+    plot_q2_model_comparison,
+)
 from src.sensitivity import run_cap_sensitivity, run_discount_sensitivity, run_penalty_sensitivity
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -238,6 +243,8 @@ def main(argv=None) -> None:
     q2.add_argument("--output-dir", type=Path)
     q2.add_argument("--verbose", action="store_true")
     q2.add_argument("--soft-ir", action="store_true", help="relax IR lexicographically (min sum(s_i), then min cost)")
+    ap.add_argument("--plot-q2-comparison", action="store_true",
+                    help="plot C, DP-cap, DP-BB, and DP-IR-soft from existing JSON results")
     args = ap.parse_args(argv)
     if args.question == 2 and args.sensitivity:
         ap.error("--sensitivity runs the Q1 studies; use --question 1 (the default)")
@@ -246,7 +253,14 @@ def main(argv=None) -> None:
     # === [CHANGE 4] Guard against --soft-ir used without --variant ir ===
     if args.soft_ir and (args.question != 2 or args.variant != "ir"):
         ap.error("--soft-ir requires --question 2 --variant ir")
-    # === [END CHANGE 4] ===
+
+    if args.plot_q2_comparison:
+        plot_q2_model_comparison(
+            community=args.community,
+            day=args.day,
+            results_root=RESULTS_DIR,
+        )
+        return
 
     com = load_community(args.community, day=args.day)
     print(com.summary(), "\n")

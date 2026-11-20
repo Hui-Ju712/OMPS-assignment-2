@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any 
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -143,3 +144,86 @@ def plot_consumer_cost_comparison(
     ax.legend(title="Model")
 
     return _finish(fig, save_to)
+
+def plot_internal_price_comparison(
+    results_by_model: dict[str, dict],
+    title: str = "Internal Price Comparison",
+    save_to: Path | str | None = None,
+) -> plt.Figure:
+    """Plot 24-hour internal prices for several pricing models."""
+    fig, ax = plt.subplots(figsize=(12, 5))
+    styles = {
+        "C": {"color": "black", "linestyle": "--"},
+        "DP-cap": {"color": "tab:blue", "linestyle": "-"},
+        "DP-BB": {"color": "tab:orange", "linestyle": "-"},
+        "DP-IR-soft": {"color": "tab:red", "linestyle": "-"},
+    }
+
+    for model, result in results_by_model.items():
+        if "internal_prices" not in result:
+            raise KeyError(f"Model '{model}' does not contain 'internal_prices'")
+        prices = np.asarray(result["internal_prices"], dtype=float)
+        hours = np.arange(len(prices))
+        ax.step(hours, prices, where="mid", marker="o", markersize=3,
+                linewidth=1.8, label=model, **styles.get(model, {}))
+
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Internal price (DKK/kWh)")
+    ax.set_title(title)
+    ax.set_xticks(np.arange(24))
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.grid(axis="both", linestyle="--", alpha=0.3)
+    ax.legend(title="Model")
+    return _finish(fig, save_to)
+
+
+from cycler import cycler
+MODEL_COLORS = ["#264653", "#2A9D8F", "#E9C46A", "#E76F51"]
+
+def plot_q2_model_comparison(
+    community: str = "base",
+    day: str = "d1",
+    results_root: Path | str = "results",
+) -> tuple[plt.Figure, plt.Figure]:
+    """Plot C, DP-cap, DP-BB, and DP-IR-soft from existing Q2 result JSON files."""
+    root = Path(results_root) / community
+    result_paths = {
+        "DP-cap": root / f"Q2_{day}_cap" / "results.json",
+        "DP-BB": root / f"Q2_{day}_bb" / "results.json",
+        "DP-IR-soft": root / f"Q2_{day}_ir_soft" / "results.json",
+    }
+
+    reports = {}
+    missing = []
+    for label, path in result_paths.items():
+        if not path.exists():
+            missing.append(str(path))
+        else:
+            reports[label] = json.loads(path.read_text())
+    if missing:
+        raise FileNotFoundError(
+            "Missing required Q2 result(s):\n" + "\n".join(missing)
+        )
+
+    c_result = reports["DP-cap"]["C"]
+    cost_results = {"C": c_result}
+    price_results = {"C": c_result}
+    for label in ("DP-cap", "DP-BB", "DP-IR-soft"):
+        cost_results[label] = reports[label]["DP"]
+        price_results[label] = reports[label]["DP"]
+
+    output = root / f"Q2_{day}_model_comparison"
+    with plt.rc_context({"axes.prop_cycle": cycler(color=MODEL_COLORS)}):
+        cost_fig = plot_consumer_cost_comparison(
+            cost_results,
+            models=("C", "DP-cap", "DP-BB", "DP-IR-soft"),
+            title=f"{community} {day}: Consumer Cost Comparison",
+            save_to=output / "consumer_cost_comparison_C_DP_cap_BB_IRsoft.png",
+        )
+        price_fig = plot_internal_price_comparison(
+            price_results,
+            title=f"{community} {day}: Internal Price Comparison",
+            save_to=output / "internal_price_comparison_C_DP_cap_BB_IRsoft.png",
+        )
+    print(f"Comparison plots: {output}")
+    return cost_fig, price_fig
