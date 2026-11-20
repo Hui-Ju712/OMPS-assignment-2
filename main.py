@@ -1,13 +1,14 @@
 """Run Assignment 2 experiments from one entry point.
 
-    python main.py                                  # Q1 base comparison (R, I, C)
-    python main.py --sensitivity                    # Q1 plus contract sensitivity studies
-    python main.py --question 2                     # Q2 pricing model, cap-only variant
-    python main.py --question 2 --variant bb        # Q2 with budget balance
-    python main.py --question 2 --variant ir        # Q2 with budget balance and individual rationality
-    python main.py --community my_mix --day d4      # select community and day
-    python main.py --members                        # also print all members' summaries
-    python main.py --demo                           # also run the Q3 scenario demonstration
+    python main.py                                              # Q1 base comparison (R, I, C)
+    python main.py --sensitivity                                # Q1 plus contract sensitivity studies
+    python main.py --question 2                                 # Q2 pricing model, cap-only variant
+    python main.py --question 2 --variant bb                    # Q2 with budget balance
+    python main.py --question 2 --variant ir                    # Q2 with budget balance and hard IR
+    python main.py --question 2 --variant ir --soft-ir --price-min 0.01  # Q2 with lexicographic Soft IR
+    python main.py --community my_mix --day d4                  # select community and day
+    python main.py --members                                    # also print all members' summaries
+    python main.py --demo                                       # also run the Q3 scenario demonstration
 """
 from __future__ import annotations
 
@@ -58,24 +59,25 @@ def write_cost_breakdown_csv(results_by_mode, output_path):
                 "system_cost_check_DKK": f"{result['system_cost_check']:.6f}",
             })
 
+
 def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
     """Experiment 1: Compare R, I, and C models on the base case data."""
     print("\n--- Running Question 1: Base Case Comparison ---")
-    
+
     # Model R: No contract
     print("Solving Model R (Reference)...")
     model_r = EnergyCommunityModel(data=com_data, mode="R", verbose=False)
     model_r.build_model()
     res_r = model_r.solve()
     plot_community_schedule(model_r, res_r, title="Base Case", save_to=results_dir / "Q1_Model_R_Schedule.png")
-    
+
     # Model I: Individual contracts
     print("Solving Model I (Individual Contracts)...")
     model_i = EnergyCommunityModel(data=com_data, mode="I", verbose=False)
     model_i.build_model()
     res_i = model_i.solve()
     plot_community_schedule(model_i, res_i, title="Base Case", save_to=results_dir / "Q1_Model_I_Schedule.png")
-    
+
     # Model C: Community contract (Central Dispatch)
     print("Solving Model C (Community Contract)...")
     model_c = EnergyCommunityModel(data=com_data, mode="C", verbose=False)
@@ -92,18 +94,18 @@ def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
         save_to=results_dir / "Q1_consumer_cost_comparison.png",
     )
     print(f"Cost breakdown CSV: {cost_csv}")
-    
+
     # Print the cost comparison
     print("\n--- Results Summary (Total Cost) ---")
     print(f"Model R: {res_r['objective_value']:.2f} DKK")
     print(f"Model I: {res_i['objective_value']:.2f} DKK")
     print(f"Model C: {res_c['objective_value']:.2f} DKK")
-    
+
     # Display the extracted dual variables (internal prices) from Model C
     print("Model C Internal Prices:")
     for hour, price in enumerate(res_c["internal_prices"]):
         print(f"Hour {hour:02d}: {price:.3f} DKK/kWh")
-    
+
 
 def _solve_model(data, mode, config, verbose):
     model = EnergyCommunityModel(data, mode=mode, config=config, verbose=verbose)
@@ -118,10 +120,19 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
         common["discount"] = args.discount
     if args.penalty is not None:
         common["penalty"] = args.penalty
-    config = dict(common, budget_balance=args.variant in {"bb", "ir"},
-                  individual_rationality=args.variant == "ir",
-                  price_bounds=(args.price_min, args.price_max),
-                  time_limit=args.time_limit, mip_gap=args.mip_gap)
+
+    # === [CHANGE 1] Pass soft_ir into config ===
+    config = dict(
+        common,
+        budget_balance=args.variant in {"bb", "ir"},
+        individual_rationality=args.variant == "ir",
+        soft_ir=args.soft_ir,
+        price_bounds=(args.price_min, args.price_max),
+        time_limit=args.time_limit,
+        mip_gap=args.mip_gap,
+    )
+    # === [END CHANGE 1] ===
+
     references = {}
     # IR outside options are recalculated under the same contract and daily-energy rule.
     if args.variant == "ir":
@@ -129,8 +140,10 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
         for mode in modes:
             _, references[mode] = _solve_model(data, mode, common, args.verbose)
         config["benchmark_costs"] = {
-            member.consumer_id: min(result["consumer_costs"][member.consumer_id]
-                                    for result in references.values())
+            member.consumer_id: min(
+                result["consumer_costs"][member.consumer_id]
+                for result in references.values()
+            )
             for member in data.members
         }
     model = EnergyCommunityModel(data, mode="DP", config=config, verbose=args.verbose)
@@ -143,12 +156,23 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
         return
     _, central = _solve_model(data, "C", common, args.verbose)
     result = model.solve()
-    output = args.output_dir or results_dir / args.community / f"Q2_{args.day}_{args.variant}"
+
+    # === [CHANGE 2] Separate output folder and title when --soft-ir is active ===
+    suffix = "_soft" if (args.variant == "ir" and args.soft_ir) else ""
+    label = f"{args.variant.upper()}-SOFT" if suffix else args.variant.upper()
+    output = args.output_dir or results_dir / args.community / f"Q2_{args.day}_{args.variant}{suffix}"
+    # === [END CHANGE 2] ===
+
     output.mkdir(parents=True, exist_ok=True)
-    report = {"configuration": config, "day": args.day,
-              "solution_concept": "optimistic", "DP": result, "C": central,
-              "outside_options": references,
-              "cost_above_C_DKK": result["objective_value"] - central["objective_value"]}
+    report = {
+        "configuration": config,
+        "day": args.day,
+        "solution_concept": "optimistic",
+        "DP": result,
+        "C": central,
+        "outside_options": references,
+        "cost_above_C_DKK": result["objective_value"] - central["objective_value"],
+    }
     if "benchmark_costs" in config:
         report["individual_gains_DKK"] = {
             cid: benchmark - result["consumer_costs"][cid]
@@ -166,13 +190,29 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
     plot_consumer_cost_comparison(
         {"C": central, "DP": result},
         models=("C", "DP"),
-        title=f"{args.community} {args.day} - Q2 {args.variant.upper()}: C vs DP Consumer Costs",
+        title=f"{args.community} {args.day} - Q2 {label}: C vs DP Consumer Costs",
         save_to=output / "consumer_cost_comparison.png",
     )
     print(f"DP: {result['objective_value']:.6f} DKK ({result['status']}, "
           f"gap {result['mip_gap']:.3g}); C: {central['objective_value']:.6f} DKK")
+    print(f"Efficiency cost (DP - C): {report['cost_above_C_DKK']:.6f} DKK")
     print(f"Manager balance: {result['manager_balance']:.6f} DKK")
+
+    # === [CHANGE 3] Print Soft IR diagnostics (minimum violation & blocking members) ===
+    if "total_ir_violation_DKK" in result:
+        print(f"Min total IR violation (sum s_i): {result['total_ir_violation_DKK']:.6f} DKK")
+        blocking = result["blocking_members"]
+        if blocking:
+            slacks_str = ", ".join(
+                f"{cid}: {result['ir_slacks'][cid]:.4f} DKK" for cid in blocking
+            )
+            print(f"Blocking members ({len(blocking)}): {slacks_str}")
+        else:
+            print("Blocking members: None (hard IR is feasible)")
+    # === [END CHANGE 3] ===
+
     print(f"Results: {output}")
+
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -197,11 +237,16 @@ def main(argv=None) -> None:
     q2.add_argument("--export-model", type=Path, help="write the DP LP/SOS model without solving")
     q2.add_argument("--output-dir", type=Path)
     q2.add_argument("--verbose", action="store_true")
+    q2.add_argument("--soft-ir", action="store_true", help="relax IR lexicographically (min sum(s_i), then min cost)")
     args = ap.parse_args(argv)
     if args.question == 2 and args.sensitivity:
         ap.error("--sensitivity runs the Q1 studies; use --question 1 (the default)")
     if args.question == 1 and args.export_model:
         ap.error("--export-model requires --question 2")
+    # === [CHANGE 4] Guard against --soft-ir used without --variant ir ===
+    if args.soft_ir and (args.question != 2 or args.variant != "ir"):
+        ap.error("--soft-ir requires --question 2 --variant ir")
+    # === [END CHANGE 4] ===
 
     com = load_community(args.community, day=args.day)
     print(com.summary(), "\n")
