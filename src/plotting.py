@@ -72,7 +72,7 @@ def plot_community_schedule(
     
     # Internal clearing price (only applicable to Model C, dashed purple line)
     if model_obj.mode == "C" and "internal_prices" in results_dict:
-        ax2.step(T, results_dict["internal_prices"], where='mid', color='purple', linestyle='--', label='Internal Price ($\lambda$)')
+        ax2.step(T, results_dict["internal_prices"], where='mid', color='purple', linestyle='--', label=r'Internal Price ($\lambda$)')
         
     ax2.set_ylabel("Price (DKK/kWh)")
     
@@ -83,4 +83,63 @@ def plot_community_schedule(
     
     fig.suptitle(f"{title} - Mode {model_obj.mode} (Cost: {results_dict['objective_value']:.2f} DKK)")
     
+    return _finish(fig, save_to)
+
+def plot_consumer_cost_comparison(
+    results_by_model: dict[str, dict],
+    models: list[str] | tuple[str, ...] | None = None,
+    title: str = "Consumer Cost Comparison",
+    save_to: Path | str | None = None,
+) -> plt.Figure:
+    """Plot per-consumer costs for a user-selected set of models.
+
+    Args:
+        results_by_model: Mapping from model name to its solve result dictionary.
+            Each result must contain a ``consumer_costs`` mapping.
+        models: Model names to include. Defaults to all available models.
+            Example: ``["R", "I"]`` or ``["C", "DP"]``.
+        title: Figure title.
+        save_to: Optional image path.
+
+    Returns:
+        Matplotlib figure containing grouped bar charts.
+    """
+    available = list(results_by_model)
+    selected = list(available if models is None else models)
+
+    missing = [model for model in selected if model not in results_by_model]
+    if missing:
+        raise KeyError(f"Unknown model(s): {missing}. Available models: {available}")
+
+    consumer_ids = []
+    for model in selected:
+        for consumer_id in results_by_model[model]["consumer_costs"]:
+            if consumer_id not in consumer_ids:
+                consumer_ids.append(consumer_id)
+
+    if not consumer_ids:
+        raise ValueError("No consumer cost data found")
+
+    fig, ax = plt.subplots(figsize=(max(12, len(consumer_ids) * 0.75), 6))
+    x = np.arange(len(consumer_ids))
+    width = 0.8 / len(selected)
+
+    for offset, model in enumerate(selected):
+        costs = results_by_model[model]["consumer_costs"]
+        values = [costs.get(consumer_id, np.nan) for consumer_id in consumer_ids]
+        ax.bar(
+            x + (offset - (len(selected) - 1) / 2) * width,
+            values,
+            width,
+            label=model,
+        )
+
+    ax.set_xlabel("Consumer")
+    ax.set_ylabel("Cost (DKK)")
+    ax.set_title(title)
+    ax.set_xticks(x, consumer_ids, rotation=45, ha="right")
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.legend(title="Model")
+
     return _finish(fig, save_to)
