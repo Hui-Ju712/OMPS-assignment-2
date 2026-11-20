@@ -20,7 +20,7 @@ import gurobipy as gp
 
 from src.data_loader import load_community, list_communities
 from src.model import EnergyCommunityModel
-from src.plotting import plot_community_schedule
+from src.plotting import plot_community_schedule, plot_consumer_cost_comparison
 from src.sensitivity import run_cap_sensitivity, run_discount_sensitivity, run_penalty_sensitivity
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -86,6 +86,11 @@ def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
     cost_results = {"R": res_r, "I": res_i, "C": res_c}
     cost_csv = results_dir / "Q1_cost_breakdown.csv"
     write_cost_breakdown_csv(cost_results, cost_csv)
+    plot_consumer_cost_comparison(
+        cost_results,
+        title="Base Case: Consumer Cost Comparison",
+        save_to=results_dir / "Q1_consumer_cost_comparison.png",
+    )
     print(f"Cost breakdown CSV: {cost_csv}")
     
     # Print the cost comparison
@@ -98,6 +103,7 @@ def run_q1_base_comparison(com_data, results_dir=RESULTS_DIR):
     print("Model C Internal Prices:")
     for hour, price in enumerate(res_c["internal_prices"]):
         print(f"Hour {hour:02d}: {price:.3f} DKK/kWh")
+    
 
 def _solve_model(data, mode, config, verbose):
     model = EnergyCommunityModel(data, mode=mode, config=config, verbose=verbose)
@@ -157,6 +163,12 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
             writer.writerow([t, result["internal_prices"][t], model.var["P_imp"][t].X,
                              model.var["P_exp"][t].X, model.cap_limit[t],
                              model.var["P_exc"][t].X])
+    plot_consumer_cost_comparison(
+        {"C": central, "DP": result},
+        models=("C", "DP"),
+        title=f"{args.community} {args.day} - Q2 {args.variant.upper()}: C vs DP Consumer Costs",
+        save_to=output / "consumer_cost_comparison.png",
+    )
     print(f"DP: {result['objective_value']:.6f} DKK ({result['status']}, "
           f"gap {result['mip_gap']:.3g}); C: {central['objective_value']:.6f} DKK")
     print(f"Manager balance: {result['manager_balance']:.6f} DKK")
