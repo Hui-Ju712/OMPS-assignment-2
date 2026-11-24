@@ -18,7 +18,7 @@
     "objective_value": 372.16243447368373,
     "status": "Optimal",
     "solver_status": 2,
-    "runtime_seconds": 0.5896639823913574,
+    "runtime_seconds": 0.5911710262298584,
     "internal_prices": [
       1.4099999999999997,
       1.4099999999999997,
@@ -96,7 +96,7 @@
     "objective_value": 372.16243447368373,
     "status": "Optimal",
     "solver_status": 2,
-    "runtime_seconds": 0.006884098052978516,
+    "runtime_seconds": 0.007909059524536133,
     "internal_prices": [
       1.41,
       1.4099999999999997,

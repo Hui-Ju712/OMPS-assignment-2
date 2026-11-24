@@ -178,7 +178,7 @@ def plot_internal_price_comparison(
 
 
 from cycler import cycler
-MODEL_COLORS = ["#264653", "#2A9D8F", "#E9C46A", "#E76F51"]
+MODEL_COLORS = ["#264653", "#2A9D8F", "#E9C46A", "#E76F51",  "#6A4C93", "#8AB17D"]
 
 def plot_q2_model_comparison(
     community: str = "base",
@@ -205,20 +205,35 @@ def plot_q2_model_comparison(
             "Missing required Q2 result(s):\n" + "\n".join(missing)
         )
 
+    soft_report = reports["DP-IR-soft"]
+    outside_options = soft_report.get("outside_options", {})
+    if not {"R", "I"}.issubset(outside_options):
+        raise KeyError("DP-IR-soft results must contain outside_options for both R and I")
+
+    r_costs = outside_options["R"]["consumer_costs"]
+    i_costs = outside_options["I"]["consumer_costs"]
+    reference_costs = {
+        consumer_id: min(r_costs[consumer_id], i_costs[consumer_id])
+        for consumer_id in r_costs
+        if consumer_id in i_costs
+    }
+
     c_result = reports["DP-cap"]["C"]
-    cost_results = {"C": c_result}
+    cost_results = {
+        "Reference min(R,I)": {"consumer_costs": reference_costs},
+        "C": c_result,
+    }
     price_results = {"C": c_result}
     for label in ("DP-cap", "DP-BB", "DP-IR-soft"):
         cost_results[label] = reports[label]["DP"]
         price_results[label] = reports[label]["DP"]
-
     output = root / f"Q2_{day}_model_comparison"
     with plt.rc_context({"axes.prop_cycle": cycler(color=MODEL_COLORS)}):
         cost_fig = plot_consumer_cost_comparison(
             cost_results,
-            models=("C", "DP-cap", "DP-BB", "DP-IR-soft"),
+            models=("Reference min(R,I)", "C", "DP-cap", "DP-BB", "DP-IR-soft"),
             title=f"{community} {day}: Consumer Cost Comparison",
-            save_to=output / "consumer_cost_comparison_C_DP_cap_BB_IRsoft.png",
+            save_to=output / "consumer_cost_comparison_ref_C_DP_cap_BB_IRsoft.png",
         )
         price_fig = plot_internal_price_comparison(
             price_results,
