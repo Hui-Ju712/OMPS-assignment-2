@@ -24,6 +24,8 @@ class EnergyCommunityModel:
         self.data = data
         self.mode = mode.upper()
         self.config = config or {}
+        if self.config.get("price_scope", "uniform") not in {"uniform", "individual"}:
+            raise ValueError("price_scope must be 'uniform' or 'individual'")
         if self.mode not in {"R", "I", "C", "DP"}:
             raise ValueError(f"Unknown model mode: {self.mode}")
         if self.config.get("daily_energy_rule", "fixed") not in {"fixed", "minimum"}:
@@ -78,7 +80,11 @@ class EnergyCommunityModel:
         upper = GRB.INFINITY if upper is None else float(upper)
         if math.isnan(lower) or math.isnan(upper) or lower > upper:
             raise ValueError("Invalid price_bounds")
-        prices = m.addVars(self.T, lb=lower, ub=upper, name="lambda")
+        individual_prices = config.get("price_scope", "uniform") == "individual"
+        if individual_prices:
+            prices = m.addVars(len(self.members), self.T, lb=lower, ub=upper, name="lambda")
+        else:
+            prices = m.addVars(self.T, lb=lower, ub=upper, name="lambda")
         self.var["lambda"] = prices
 
         # Settlement constraints can otherwise make wasteful grid loops or voluntary
@@ -143,10 +149,11 @@ class EnergyCommunityModel:
             )
             for key in DEVICE_KEYS:
                 for t in self.T:
+                    price = prices[i, t] if individual_prices else prices[t]
                     coefficient = {
-                        "load": prices[t], "pv": member.pv_marginal_cost - prices[t],
-                        "dev": member.linear_disutility, "p_ch": prices[t],
-                        "p_dis": -prices[t], "soc": 0.0,
+                        "load": price, "pv": member.pv_marginal_cost - price,
+                        "dev": member.linear_disutility, "p_ch": price,
+                        "p_dis": -price, "soc": 0.0,
                     }[key]
                     variable = self.var[key][i, t]
                     self.con["member_stationarity"][i, key, t] = m.addConstr(
@@ -384,10 +391,53 @@ class EnergyCommunityModel:
 
         self.m.setObjective(obj, GRB.MINIMIZE)
 
+    def warm_start_from_central(self, central):
+        """Try to support C's dispatch under this model's own prices and requirements.
+
+        This supplies a feasible MIP start only. The full DP solve remains free to
+        change every device schedule; no central-dispatch constraint is retained.
+        """
+        if self.mode != "DP" or central.mode != "C":
+            raise ValueError("A DP model and a solved C model are required")
+        candidate = self.m.copy()
+        candidate.Params.OutputFlag = 0
+        candidate.Params.TimeLimit = min(10.0, self.config.get("time_limit", 300.0))
+        try:
+            for key in (*DEVICE_KEYS, "P_imp", "P_exp", "P_below", "P_exc"):
+                for index, variable in self.var[key].items():
+                    fixed = candidate.getVarByName(variable.VarName)
+                    value = central.var[key][index].X
+                    fixed.LB = value
+                    fixed.UB = value
+            candidate.optimize()
+            if candidate.SolCount:
+                self.m.setAttr("Start", self.m.getVars(),
+                               [candidate.getVarByName(v.VarName).X for v in self.m.getVars()])
+                return True
+            return False
+        finally:
+            candidate.dispose()
+
     def solve(self):
         """Solve the optimization model and return the results, including dual variables."""
         self.m.optimize()
         
+        if self.m.SolCount == 0 and self.mode == "DP":
+            statuses = {
+                GRB.INFEASIBLE: "Infeasible",
+                GRB.INF_OR_UNBD: "Infeasible or unbounded",
+                GRB.TIME_LIMIT: "Time limit: no feasible solution found",
+                GRB.INTERRUPTED: "Interrupted: no feasible solution found",
+            }
+            bound = self.m.ObjBound
+            return {
+                "objective_value": None,
+                "status": statuses.get(self.m.Status, "No feasible solution found"),
+                "solver_status": self.m.Status,
+                "runtime_seconds": self.m.Runtime,
+                "objective_bound": bound if math.isfinite(bound) and abs(bound) < GRB.INFINITY else None,
+                "mip_gap": None,
+            }
         if self.m.SolCount == 0:
             raise RuntimeError(
                 f"Model has no solution. Status code: {self.m.Status} "
@@ -414,8 +464,21 @@ class EnergyCommunityModel:
             results["internal_prices"] = internal_prices
 
         if self.mode == "DP":
-            internal_prices = [self.var["lambda"][t].X for t in self.T]
-            results["internal_prices"] = internal_prices
+            individual_prices = self.config.get("price_scope", "uniform") == "individual"
+            prices_by_member = {
+                member.consumer_id: [
+                    (self.var["lambda"][i, t] if individual_prices else self.var["lambda"][t]).X
+                    for t in self.T
+                ]
+                for i, member in enumerate(self.members)
+            }
+            results["internal_prices_by_member"] = prices_by_member
+            results["price_scope"] = self.config.get("price_scope", "uniform")
+            if individual_prices:
+                internal_prices = prices_by_member
+            else:
+                internal_prices = prices_by_member[self.members[0].consumer_id]
+                results["internal_prices"] = internal_prices
             results["mip_gap"] = self.m.MIPGap
             results["objective_bound"] = self.m.ObjBound
             from src.pricing import pricing_diagnostics
@@ -465,8 +528,10 @@ class EnergyCommunityModel:
             )
             settlement = 0.0
             for i, member in enumerate(self.members):
+                member_prices = (internal_prices[member.consumer_id]
+                                 if isinstance(internal_prices, dict) else internal_prices)
                 consumer_settlement = sum(
-                    internal_prices[t] * (
+                    member_prices[t] * (
                         self.var["load"][i, t].X
                         + self.var["p_ch"][i, t].X
                         - self.var["pv"][i, t].X

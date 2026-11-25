@@ -319,18 +319,123 @@ Optional switches impose exact budget balance and member-level individual
 rationality. The solution concept is optimistic when responses are not unique.
 
 ```bash
+python main.py --question 2 --variant all   # run and save all three variants
 python main.py --question 2 --variant cap
 python main.py --question 2 --variant bb
 python main.py --question 2 --variant ir --ir-reference both
-python main.py --question 2 --variant cap --export-model results/Q2_DP.lp
+python main.py --question 2 --variant cap --export-model results/Q2_DP_cap.lp
 ```
 
 Full runs require an academic Gurobi licence. Cap-only model export works
-with the restricted licence. Results include prices, member costs,
-manager balance, the C comparison, optimality gap and KKT/payment checks, written
-to `results/<community>/Q2_<day>_<variant>/`. Use `--output-dir` for distinct
+with the restricted licence. `run_q2_pricing()` in `main.py` solves the models,
+and `save_q2_results()` writes the solver results directly to CSV:
+
+- `summary.csv`: R/I/C and selected DP costs, manager balance, flexibility metrics,
+  solver status/gap, KKT checks and experiment settings.
+- `member_costs.csv`: member costs and gains against R, I and the best outside option.
+- `schedule.csv`: hourly community import/export, cap, exceedance and prices.
+- `members_schedule.csv`: hourly load, PV, battery and deviation values per member.
+
+These files are saved to `results/<community>/Q2_<day>_<variant>/`. No JSON result
+files are produced. Infeasible or time-limited runs without an incumbent get a
+status row with blank costs and no invented schedule. `--variant all` reuses the
+same R/I/C benchmarks and updates the CSVs after each DP solve.
+Use `--output-dir` for distinct
 parameter studies. Running `python main.py` still executes the existing Q1 comparison;
 `python main.py --sensitivity` retains the Q1 sensitivity studies.
 
 The existing fixed daily-energy convention is preserved by default; `--daily-energy-rule minimum` applies the
 minimum-energy inequality consistently to DP and its comparisons.
+
+### Q2 extension: member-specific prices
+
+Cap-only and BB use uniform prices by default. The IR step uses member-specific
+prices, relaxing only the requirement that all members face the same hourly price:
+`lambda[t]` becomes `lambda[i,t]`. Exact budget balance and the selected IR
+benchmark remain enforced; no participation slack or external subsidy is added.
+This follows the member-specific price structure of Crowley, Kazempour and
+Mitridati (Applied Energy 382, 2025, 125154), adapted to the assignment's devices,
+external tariff contract and MILP objective. The paper's network model, quadratic
+fairness penalties and benefit/loss variables are not copied.
+
+```bash
+python main.py --question 2 --variant ir --price-scope individual
+python main.py --question 2 --variant ir --price-scope individual --ir-reference I
+```
+
+By default IR still compares with both R and I. The individual-price runs save
+the same four CSVs in a folder with `_individual` appended, preserving uniform
+results. Prices are recorded per member in `members_schedule.csv`; a community
+price is blank in `schedule.csv` because there is no single common price. Bounds
+are unchanged by default; `--price-min 0` explicitly tests nonnegative prices.
+
+For individual prices, the code first attempts to find prices supporting C's
+dispatch as a MIP start, then solves the full DP model without fixing dispatch.
+Failure of that starting-point check does not establish infeasibility. A feasible
+solution must still pass the full solver, KKT, settlement and IR checks.
+
+### Q2 report figures and tables
+
+Every normal Q2 run calls `src/q2_reporting.py` from `main.py` and saves figures
+and tables under the run's `report/` folder. To generate them from saved CSVs
+without re-solving the three DP experiments:
+
+```bash
+python main.py --question 2 --variant all --report-only
+python main.py --question 2 --variant all --report-only --diagnose-ir
+```
+
+For a fresh experiment and its report:
+
+```bash
+python main.py --question 2 --variant all --diagnose-ir
+python main.py --question 2 --variant all --price-scope individual --price-min 0 --diagnose-ir
+```
+
+The comparison option adds only the DP cases from the extra folder, checks the
+day, energy rule, contract, IR reference and R/I/C benchmark costs, and labels
+the price-scope extension separately. Price bounds remain visible in the CSV.
+Use the same settings across the mandatory cap -> BB -> BB+IR decomposition.
+
+Report files:
+
+- `comparison_table.png` and `comparison_metrics.csv`: cost, recovery of C's
+  value, congestion, manager balance, member losses, solver status and gap.
+- `requirement_costs.csv`: observed extra cost of adding each requirement.
+  A missing incumbent produces a blank difference, not a zero or infeasibility claim.
+- `community_comparison.png`: costs, cap exceedance, manager balance and members worse off.
+- `member_gains.png` and `member_impact.csv`: gains against both R and I, plus
+  the observed shortfall against the selected IR reference. These are losses
+  under a saved settlement, not a proof that those members block every solution.
+- `import_profiles.png`: metered import against the cap, comparing Q1 with Q2.
+- `posted_prices.png`: member-by-hour prices from the most constrained solved DP case.
+- `metric_definitions.csv`: units, reference situations, equations and sign conventions.
+
+`--diagnose-ir` additionally solves a small fixed-dispatch pricing diagnostic:
+keep exact budget balance and all member KKT conditions, fix device/grid schedules
+to the saved BB dispatch (or C if BB is absent), and minimize `sum_i v_i` subject
+to `member_cost_i <= outside_cost_i + v_i`, `v_i >= 0`. It saves
+`diagnostic_summary.csv`, `diagnostic_member_shortfalls.csv` and
+`fixed_dispatch_shortfalls.png`. This quantifies the minimum participation
+shortfall achievable by repricing that specific dispatch. A positive slack is
+one optimal allocation of shortfalls, not a global or necessarily unique
+blocking-member certificate. Allowing dispatch to change might reduce the
+shortfall further. These diagnostic slacks do not relax the actual BB+IR model.
+
+Prices and member benefit allocations can be nonunique. Report the saved
+settlement as one outcome, and distinguish an optimal solution, an incumbent
+and a time limit with no incumbent in all comparisons.
+
+### Current Q2 comparison sequence
+
+`--variant all` runs cap-only, then exact BB, then exact BB+IR with individual
+prices. The retired uniform-price BB+IR case is not run or shown in reports.
+`--variant ir` automatically uses individual prices; `--price-scope uniform`
+is rejected for that variant. `--price-scope` remains available for cap/BB
+comparisons. Existing legacy uniform-IR CSV rows are omitted when rebuilding
+reports, without rewriting those historical CSV files.
+
+The final step changes both the participation requirement and the price scope.
+Its cost difference must therefore be described as the effect of that combined
+change, not as the isolated efficiency cost of adding IR under uniform prices.
+The earlier uniform-IR time limits did not establish mathematical infeasibility.
