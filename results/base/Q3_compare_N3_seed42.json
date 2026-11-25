@@ -7910,8 +7910,8 @@
       "objective_value_DKK": 372.16243447368385,
       "objective_bound_DKK": 372.1624344736846,
       "mip_gap": 0.0,
-      "runtime_seconds": 0.9868659973144531,
-      "wall_runtime_seconds": 0.9872575830086134,
+      "runtime_seconds": 0.9879879951477051,
+      "wall_runtime_seconds": 0.9883260839851573,
       "model_size": {
         "variables_continuous": 9728,
         "variables_binary": 0,
@@ -287126,8 +287126,8 @@
       "objective_value_DKK": 375.007691605891,
       "objective_bound_DKK": 375.0076916058903,
       "mip_gap": 0.0,
-      "runtime_seconds": 46.93183398246765,
-      "wall_runtime_seconds": 46.9366124580265,
+      "runtime_seconds": 39.01022815704346,
+      "wall_runtime_seconds": 39.01136970799416,
       "model_size": {
         "variables_continuous": 28416,
         "variables_binary": 0,
