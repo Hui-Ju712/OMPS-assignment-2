@@ -6,6 +6,9 @@
     python main.py --question 2 --variant all       # all three Q2 variants, saved as CSV
     python main.py --question 2 --variant bb        # Q2 with budget balance
     python main.py --question 2 --variant ir        # Q2 with budget balance and individual rationality
+    python main.py --question 3 --model det         # Q3 deterministic expected-value baseline
+    python main.py --question 3 --model sdp_e --n-scenarios 3       # Q3 expected-cost stochastic model
+    python main.py --question 3 --model compare --n-scenarios 3 --n-oos 100 --seed 42 #run Q3 models and compare results, in sample number and OOS can be changed
     python main.py --community my_mix --day d4      # select community and day
     python main.py --members                        # also print all members' summaries
     python main.py --demo                           # also run the Q3 scenario demonstration
@@ -280,6 +283,127 @@ def run_q2_pricing(data, args, results_dir=RESULTS_DIR):
     from src.q2_reporting import generate_q2_report
     generate_q2_report(output, args.compare_results, args.diagnose_ir, args.community)
 
+
+def run_q3_pricing(data, args, results_dir=RESULTS_DIR):
+    """Solve Q3 pricing variants and evaluate their fixed prices out of sample."""
+    import json
+
+    from src.stochastic_model import (
+        StochasticPricingModel,
+        draw_scenario_sets,
+        evaluate_prices_on_scenarios,
+        expected_value_scenario,
+        make_model_config,
+    )
+
+    config = make_model_config(
+        data, price_min=0.01 if args.price_min is None else args.price_min,
+        price_max=20.0 if args.price_max is None else args.price_max,
+        daily_energy_rule=args.daily_energy_rule, cap_factor=args.cap_factor,
+        ir_reference=args.ir_reference, time_limit=args.time_limit, mip_gap=args.mip_gap,
+        discount=args.discount, penalty=args.penalty,
+    )
+    config = {key: value for key, value in config.items() if value is not None}
+    expected = expected_value_scenario(data, quantities=tuple(args.uncertainty))
+    effective_n = 1 if args.model == "det" else args.n_scenarios
+    in_sample, oos_scenarios, seed_metadata = draw_scenario_sets(
+        data, effective_n, args.n_oos, args.seed, args.oos_seed,
+        quantities=tuple(args.uncertainty),
+    )
+    expected_manifest = [{"id": "expected", "probability": 1.0,
+                          "theta": expected["theta"], "index": {}}]
+    in_manifest = expected_manifest if args.model == "det" else [{"id": scenario["id"], "probability": scenario["probability"],
+                    "theta": scenario["theta"],
+                    "index": {f"{quantity}:{cid}": index
+                              for (quantity, cid), index in scenario["index"].items()}}
+                   for scenario in in_sample]
+    oos_manifest = [{"id": scenario["id"], "probability": scenario["probability"],
+                     "theta": scenario["theta"],
+                     "index": {f"{quantity}:{cid}": index
+                               for (quantity, cid), index in scenario["index"].items()}}
+                    for scenario in oos_scenarios]
+
+    def solve(scenarios):
+        model = StochasticPricingModel(data, scenarios, config, verbose=args.verbose)
+        try:
+            result = model.solve()
+            return result
+        finally:
+            model.dispose()
+
+    results = {}
+    if args.model in {"det", "compare"}:
+        deterministic = solve([expected])
+        deterministic["oos"] = evaluate_prices_on_scenarios(
+            deterministic["prices_x_it"], oos_scenarios, data, config)
+        results["DP_det"] = deterministic
+
+    if args.model in {"sdp_e", "compare"}:
+        # Explicit cross-check: the expected-value singleton and DP_det use this same class.
+        consistency = solve([expected])
+        if args.model == "compare":
+            reference = results["DP_det"]
+        else:
+            reference = solve([expected])
+        consistency_error = max(
+            abs(consistency["objective_value_DKK"] - reference["objective_value_DKK"]),
+            max(abs(consistency["prices_x_it"][cid][t] - reference["prices_x_it"][cid][t])
+                for cid in data.member_ids for t in range(24)),
+        )
+        if consistency_error >= 1e-6:
+            raise RuntimeError(f"DP_det / expected-scenario SDP_E consistency failed: {consistency_error:g}")
+        residuals_ok = all(
+            value < 1e-6 for key, value in consistency["diagnostics"].items()
+            if key in {"kkt_primal_residual", "kkt_stationarity_residual",
+                       "kkt_complementarity_residual", "payment_identity_residual"})
+        if not residuals_ok:
+            raise RuntimeError(f"Expected-scenario KKT/payment residual check failed: {consistency['diagnostics']}")
+        stochastic = solve(in_sample)
+        stochastic["oos"] = evaluate_prices_on_scenarios(
+            stochastic["prices_x_it"], oos_scenarios, data, config)
+        stochastic["consistency_check"] = {
+            "expected_singleton_objective_difference_DKK": abs(
+                consistency["objective_value_DKK"] - reference["objective_value_DKK"]),
+            "expected_singleton_max_price_difference": max(
+                abs(consistency["prices_x_it"][cid][t] - reference["prices_x_it"][cid][t])
+                for cid in data.member_ids for t in range(24)),
+            "residuals_below_1e-6": residuals_ok,
+        }
+        results["SDP_E"] = stochastic
+
+    if args.model == "compare":
+        print("\nQ3 side-by-side comparison")
+        print(f"{'Model':<10} {'In-sample':>13} {'OOS mean':>13} {'OOS CVaR95':>13} "
+              f"{'Cap rate':>9} {'BB deficit':>11} {'BB mean':>11} {'BB worst':>11} "
+              f"{'max E[IR]':>11} {'V/L/SOS1':>18} {'Runtime s':>11}")
+        for label, result in results.items():
+            oos = result["oos"]["summary"]
+            cap_rate = oos["cap_exceedance"]["scenario_frequency"]
+            print(f"{label:<10} {result['objective_value_DKK']:>13.3f} "
+                  f"{oos['community_cost_DKK']['mean']:>13.3f} "
+                  f"{oos['community_cost_DKK']['cvar_95']:>13.3f} "
+                  f"{cap_rate:>9.3f} {oos['bb_deficit_frequency']:>11.3f} "
+                  f"{oos['bb_mean_DKK']:>11.3f} {oos['bb_min_DKK']:>11.3f} "
+                  f"{oos['ir']['max_expected_ir_violation_DKK']:>11.3f} "
+                  f"{result['model_size']['variables_continuous']:>5d}/"
+                  f"{result['model_size']['linear_constraints']:>5d}/"
+                  f"{result['model_size']['sos1_constraints']:>4d} "
+                  f"{result['runtime_seconds']:>11.2f}")
+
+    output = args.output_dir or results_dir / args.community
+    output.mkdir(parents=True, exist_ok=True)
+    output_file = output / f"Q3_{args.model}_N{effective_n}_seed{args.seed}.json"
+    payload = {
+        "question": 3, "community": args.community, "day": args.day,
+        "model": args.model, "configuration": config, "seeds": seed_metadata,
+        "expected_scenario": expected_manifest,
+        "in_sample_scenarios": in_manifest, "oos_scenarios": oos_manifest,
+        "results": results,
+    }
+    with output_file.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, allow_nan=False)
+    print(f"Q3 structured results saved to {output_file}")
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--community", default="base", help=f"base (shipped) or your own params_community_<name>.json; available: {list_communities()}")
@@ -287,7 +411,7 @@ def main(argv=None) -> None:
     ap.add_argument("--members", action="store_true", help="print the Assignment 1 summary of every member")
     ap.add_argument("--demo", action="store_true", help="run the scenario-generation demonstration")
     ap.add_argument("--sensitivity", action="store_true", help="run tariff, penalty, and capacity sensitivity analyses")
-    ap.add_argument("--question", type=int, choices=(1, 2), default=1,
+    ap.add_argument("--question", type=int, choices=(1, 2, 3), default=1,
                     help="experiment to run (default: 1, the existing Q1 comparison)")
     q2 = ap.add_argument_group("Question 2 options (use with --question 2)")
     q2.add_argument("--variant", choices=("cap", "bb", "ir", "all"), default="cap")
@@ -311,6 +435,18 @@ def main(argv=None) -> None:
                     help="also compare an existing Q2 result folder; repeat for several folders")
     q2.add_argument("--diagnose-ir", action="store_true",
                     help="minimize participation shortfalls by repricing the saved fixed BB/C dispatch")
+    q3 = ap.add_argument_group("Question 3 options (use with --question 3)")
+    q3.add_argument("--model", choices=("det", "sdp_e", "compare"), default="sdp_e",
+                    help="DP_det, expected-cost SDP_E, or both with a comparison table")
+    q3.add_argument("--n-scenarios", type=int, default=5,
+                    help="number of nested in-sample scenarios for SDP_E")
+    q3.add_argument("--n-oos", type=int, default=100,
+                    help="number of independent out-of-sample scenarios")
+    q3.add_argument("--seed", type=int, default=42, help="in-sample scenario seed")
+    q3.add_argument("--oos-seed", type=int,
+                    help="OOS seed (default: in-sample seed + 1)")
+    q3.add_argument("--uncertainty", choices=("profile", "cL"), nargs="+",
+                    default=("profile",), help="uncertain preference quantities")
     args = ap.parse_args(argv)
     if args.variant == "ir" and args.price_scope == "uniform":
         ap.error("The IR variant now uses individual prices; omit --price-scope or use individual")
@@ -323,7 +459,7 @@ def main(argv=None) -> None:
         return
     if args.variant == "all" and args.export_model:
         ap.error("--export-model needs a single variant: cap, bb or ir")
-    if args.question == 2 and args.sensitivity:
+    if args.question in {2, 3} and args.sensitivity:
         ap.error("--sensitivity runs the Q1 studies; use --question 1 (the default)")
     if args.question == 1 and args.export_model:
         ap.error("--export-model requires --question 2")
@@ -341,8 +477,12 @@ def main(argv=None) -> None:
         out_dir = RESULTS_DIR / args.community
         out_dir.mkdir(parents=True, exist_ok=True)
         run_q1_base_comparison(com, out_dir)
-    else:
+    elif args.question == 2:
         run_q2_pricing(com, args, RESULTS_DIR)
+    else:
+        if args.n_scenarios < 1 or args.n_oos < 1:
+            ap.error("--n-scenarios and --n-oos must be positive")
+        run_q3_pricing(com, args, RESULTS_DIR)
     if args.sensitivity:
         sensitivity_dir = RESULTS_DIR / "base_sensitivity"
         sensitivity_dir.mkdir(parents=True, exist_ok=True)
