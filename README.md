@@ -344,8 +344,9 @@ Use `--output-dir` for distinct
 parameter studies. Running `python main.py` still executes the existing Q1 comparison;
 `python main.py --sensitivity` retains the Q1 sensitivity studies.
 
-The existing fixed daily-energy convention is preserved by default; `--daily-energy-rule minimum` applies the
-minimum-energy inequality consistently to DP and its comparisons.
+Questions 1 and 2 use the Assignment 1 minimum daily-energy constraint: each member's daily consumption is at least
+the reference energy. In Q2 this inequality is applied consistently to DP and its R/I/C comparisons. The earlier
+fixed-energy equality can be reproduced for Q2 with `--daily-energy-rule fixed`.
 
 ### Q2 extension: member-specific prices
 
