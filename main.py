@@ -299,7 +299,8 @@ def main(argv=None) -> None:
     q2.add_argument("--cap-factor", type=float, default=1.0)
     q2.add_argument("--price-min", type=float)
     q2.add_argument("--price-max", type=float)
-    q2.add_argument("--daily-energy-rule", choices=("fixed", "minimum"), default="fixed")
+    q2.add_argument("--daily-energy-rule", choices=("fixed", "minimum"), default="minimum",
+                    help="daily load constraint for Q2 and its R/I/C benchmarks (default: minimum-energy inequality)")
     q2.add_argument("--time-limit", type=float, default=300.0)
     q2.add_argument("--mip-gap", type=float, default=1e-4)
     q2.add_argument("--export-model", type=Path, help="write the DP LP/SOS model without solving")

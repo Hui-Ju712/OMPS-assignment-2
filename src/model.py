@@ -28,7 +28,7 @@ class EnergyCommunityModel:
             raise ValueError("price_scope must be 'uniform' or 'individual'")
         if self.mode not in {"R", "I", "C", "DP"}:
             raise ValueError(f"Unknown model mode: {self.mode}")
-        if self.config.get("daily_energy_rule", "fixed") not in {"fixed", "minimum"}:
+        if self.config.get("daily_energy_rule", "minimum") not in {"fixed", "minimum"}:
             raise ValueError("daily_energy_rule must be 'fixed' or 'minimum'")
         
         # Allow overriding default contract terms via config (useful for sensitivity analysis)
@@ -232,11 +232,10 @@ class EnergyCommunityModel:
             
             # 2. Daily minimum energy requirement
             daily_energy = gp.quicksum(l[i, t] for t in self.T)
-            # Preserve the Q1 fixed-energy convention by default; minimum is selectable
-            # in every mode so that C and DP always use identical feasible sets.
+            # Assignment 1's daily-energy requirement is a minimum, not an equality.
             energy_constraint = (
                 daily_energy >= m_data.min_daily_energy_kWh
-                if self.config.get("daily_energy_rule", "fixed") == "minimum"
+                if self.config.get("daily_energy_rule", "minimum") == "minimum"
                 else daily_energy == m_data.min_daily_energy_kWh
             )
             self.con[f"E_min_{i}"] = self.m.addConstr(energy_constraint, name=f"E_min_{i}")
